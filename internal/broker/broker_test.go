@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	mqttpacket "github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho"
 	"golang.org/x/crypto/ssh"
 
@@ -100,7 +101,7 @@ func (e *env) dial(t *testing.T, d device, edit func(*paho.Connect)) (*conn, err
 		t.Fatal(err)
 	}
 	c := &conn{got: make(chan *paho.Publish, 8), closed: make(chan struct{}, 2)}
-	c.Client = paho.NewClient(paho.ClientConfig{Conn: nc,
+	c.Client = paho.NewClient(paho.ClientConfig{Conn: mqttpacket.NewThreadSafeConn(nc),
 		OnPublishReceived: []func(paho.PublishReceived) (bool, error){func(p paho.PublishReceived) (bool, error) {
 			c.got <- p.Packet
 			return true, nil

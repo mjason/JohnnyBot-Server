@@ -148,7 +148,7 @@ func mqttCredentials(
 | kind | 数据 |
 | --- | --- |
 | `thread.upsert` | 完整 thread 列表对象，运行中带 `active_turn_id`。 |
-| `session.setup` | 新会话的 ACP `session/new` 结果，可能包含模式或配置选项。 |
+| `session.setup` | 创建或重新连接会话时的 ACP 初始设置，含 `sessionId`、`canDelete`，以及 agent 提供的 `configOptions`、`modes`。 |
 | `acp.history` | 首次打开导入的 ACP `SessionNotification`。可按它的 `update.sessionUpdate` 重建消息和工具卡片。 |
 | `turn.started` | `turn_id`、`device_id`、`cmd_id`，用于关联设备上的待发送行。 |
 | `message.user` | `turn_id` 和原 ACP `prompt` 数组。将它作为实时用户消息的规范来源。 |
@@ -207,8 +207,8 @@ CREATE TABLE outbox (
 | `session/cancel` | `turn.cancel`，需带准确的 `turn_id`。 |
 | `session/close`、客户端断线 | 客户端离开 scope 即可。正在运行的任务由服务端管理，重新打开能补齐。 |
 | `_johnny/read_project_file` | `file.read`，按 thread 的项目目录读取，按需分页。 |
-| `session/fork`、`session/delete`、透传 ACP 配置变更 | 目前提供列表重命名和归档。分叉、删除 Agent 会话和修改 ACP 配置尚未迁移。 |
-| `/shell` 多标签 PTY 与抢控制权 | Go 版尚未迁移。现有终端功能仍在 TS demo。 |
+| `session/fork` | 尚未迁移。 |
+| `/shell` 多标签 PTY 与抢控制权 | `terminal.*`，见下节。 |
 
 两套客户端协议不同，Swift 需要接入 MQTT JSON 和本地同步库才能使用 Go 服务。TS demo 的临时 replay 不包含可直接导入的持久化数据库。Go 通过同一 Agent 账号的 `session/list` 重新发现现有会话，然后在首次打开时尝试导入历史。
 
@@ -228,3 +228,24 @@ sqlite3 /path/to/johnnybot.db \
 ```
 
 正常重启沿用 epoch；已运行的 turn 标记为 interrupted，待答复审批过期。同一 epoch 中尚未领取的写命令会继续处理。已领取且没有提交结果的命令持久化为 interrupted。当前服务保留事件日志和命令去重记录，容量规划应包含消息、工具输出及 WAL。初次导入的单个 Agent 历史最多 20,000 条更新和 32 MiB，超过时会报告 `history_too_large`。
+
+## 会话管理与终端
+
+`workspaces.list` 返回的 `capabilities` 含布尔值 `thread_delete`、`thread_config`、`thread_mode`、`terminal`。终端需要 Linux、bubblewrap、bash 及可用的用户命名空间。对具体会话的按钮以最新 `session.setup` 的能力和选项为准。使用同一设备私有 cmd/reply topic、MQTT 5 QoS 1、`cmd_id`、写入用的 `epoch`。
+
+| 命令 | 输入 | 行为 |
+|------|------|------|
+| `thread.set_config` | `thread_id,config_id,value` | 将字符串选项 ID 或布尔值交给 ACP。成功回复及详情事件 `session.config` 携带完整 `configOptions`。模型作为 agent 声明的配置项选择。 |
+| `thread.set_mode` | `thread_id,mode_id` | 修改 ACP 模式。成功回复及详情事件 `session.mode` 携带 `currentModeId`。 |
+| `thread.delete` | `thread_id` | 要求 ACP 声明 `sessionCapabilities.delete`。上游确认后清除本地会话、详情事件和权限记录，工作区收到 `thread.deleted`，包含 `thread_id,workspace_id,deleted:true`。离线设备应用删除并清除详情缓存。已清除的 ID 在刷新时不能重新导入。上游缺少能力时返回 `unsupported`，进行中的会话返回 `thread_busy`。 |
+| `terminal.list` | `workspace_id` | 回复 `{terminals:[…]}`。 |
+| `terminal.create` | `workspace_id,path,cols,rows` | 在工作区相对目录中打开独立 PTY；创建者拥有控制权。回复 `{terminal:…}`。 |
+| `terminal.claim` | `terminal_id` | 同一用户的另一已配对设备可显式接管，回复 `{terminal:…}`。 |
+| `terminal.input` | `terminal_id,bytes` | 标准 base64，解码后 1 至 32768 字节。回复 `{accepted:N}`。按发送顺序逐个等待确认。 |
+| `terminal.resize` | `terminal_id,cols,rows` | 1 至 512 列、1 至 256 行，回复 `{terminal:…}`。 |
+| `terminal.read` | `terminal_id,offset` | 按原始字节偏移读最多 24 KiB，回复 `{bytes,first_offset,next_offset,reset,running,terminal}`，bytes 为标准 base64。 |
+| `terminal.close` | `terminal_id` | 移除标签并终止进程，回复 `{terminal_id,closed:true}`。 |
+
+终端对象含 `terminal_id,workspace_id,path,title,cols,rows,controller_device_id,running`。控制权仅限输入、调整尺寸及关闭，失去控制权时返回 `not_controller`。关闭窗口或 MQTT 断线会保留进程，重连后先 list 再从最后确认的 offset 读取。若 offset 超出 256 KiB 环形缓存，`reset:true`，客户端清空显示并应用本批字节；捕获最后一批后继续读至空。进程退出后仍可读，显式关闭后移除。服务重启会结束全部终端。每个服务最多保留 16 个标签。
+
+终端操作仅在线发送。不要将键盘输入放入离线 outbox，或者在断线后换新 cmd_id 重放未确认的按键。在同一连接中重试原始字节可获得相同回复。服务端只将终端变更命令的摘要和回复写入去重表。启动目录经工作区验证，终端中的 `/workspace` 指向此工作区，系统工具只读挂载，临时目录独立于主机。

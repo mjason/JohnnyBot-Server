@@ -1,5 +1,7 @@
 github.com/coder/acp-go-sdk v0.20.0 h1:nrDOWYLy7a32ZNi6OYqw1oDhr5j34pfKPXmGoxYlvBc=
 github.com/coder/acp-go-sdk v0.20.0/go.mod h1:yKzM/3R9uELp4+nBAwwtkS0aN1FOFjo11CNPy37yFko=
+github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
+github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/eclipse/paho.golang v0.24.0 h1:TcqZlyi9nBu1GhHeD9FPI0y8Lu2mSDRm0Wj/maWVVOw=

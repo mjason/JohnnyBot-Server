@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,8 +19,12 @@ type agentProcess interface {
 	Done() <-chan struct{}
 	Close() error
 	NewSession(context.Context, string) (acp.NewSessionResponse, error)
-	Open(context.Context, acp.SessionId, string) (bool, error)
-	LoadHistory(context.Context, acp.SessionId, string) error
+	Open(context.Context, acp.SessionId, string) (acp.NewSessionResponse, error)
+	LoadHistory(context.Context, acp.SessionId, string) (acp.NewSessionResponse, error)
+	CanDelete() bool
+	Delete(context.Context, acp.SessionId) error
+	SetConfig(context.Context, acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
+	SetMode(context.Context, acp.SessionId, acp.SessionModeId) error
 	List(context.Context) ([]acp.SessionInfo, error)
 	Prompt(context.Context, acp.SessionId, ...acp.ContentBlock) (acp.PromptResponse, error)
 	Cancel(context.Context, acp.SessionId) error
@@ -40,7 +45,21 @@ type agentRun struct {
 	streams  map[acp.SessionId]*stream
 }
 
+type sessionSetup struct {
+	SessionID     acp.SessionId             `json:"sessionId"`
+	Meta          acp.Meta                  `json:"_meta,omitempty"`
+	ConfigOptions []acp.SessionConfigOption `json:"configOptions,omitempty"`
+	Modes         *acp.SessionModeState     `json:"modes,omitempty"`
+	CanDelete     bool                      `json:"canDelete"`
+}
+
+func setup(out acp.NewSessionResponse, canDelete bool) sessionSetup {
+	return sessionSetup{out.SessionId, out.Meta, out.ConfigOptions, out.Modes, canDelete}
+}
+
 type stream struct {
+	agentTitle  string
+	setup       *sessionSetup
 	thread      thread
 	turn        string
 	replay      []json.RawMessage
@@ -99,7 +118,9 @@ func (r *agentRun) attach(ctx context.Context, t thread, cwd string) (*stream, e
 	if !t.Imported {
 		history = &stream{thread: t, isReplay: true}
 		r.setStream(id, history)
-		err := r.process.LoadHistory(ctx, id, cwd)
+		out, err := r.process.LoadHistory(ctx, id, cwd)
+		state := setup(out, r.process.CanDelete())
+		history.setup = &state
 		r.setStream(id, nil)
 		if err != nil {
 			r.adapter.service.log.Warn("load agent history", "thread", t.ID, "err", err)
@@ -107,9 +128,12 @@ func (r *agentRun) attach(ctx context.Context, t thread, cwd string) (*stream, e
 		}
 	}
 	if history == nil {
-		if _, err := r.process.Open(ctx, id, cwd); err != nil {
+		out, err := r.process.Open(ctx, id, cwd)
+		if err != nil {
 			return nil, err
 		}
+		state := setup(out, r.process.CanDelete())
+		history = &stream{thread: t, setup: &state}
 	}
 	return history, nil
 }
@@ -153,6 +177,11 @@ func (r *agentRun) Update(n acp.SessionNotification) {
 		st.replay = append(st.replay, raw)
 		st.replayBytes += len(raw)
 		return
+	}
+	if info := n.Update.SessionInfoUpdate; info != nil {
+		if title, ok := info.Title.Value(); ok && strings.TrimSpace(title) != "" {
+			st.agentTitle = strings.TrimSpace(title)
+		}
 	}
 	s := r.adapter.service
 	scope := "thread/" + st.thread.ID
@@ -213,7 +242,7 @@ func (s *Service) create(ctx context.Context, c command) (mutation, error) {
 		if err := apply(tx); err != nil {
 			return err
 		}
-		return appendEvent(tx, "thread/"+t.ID, "session.setup", out)
+		return appendEvent(tx, "thread/"+t.ID, "session.setup", setup(out, r.process.CanDelete()))
 	}
 	return m, nil
 }
@@ -259,6 +288,13 @@ func (s *Service) refresh(ctx context.Context, c command) (mutation, error) {
 		result: map[string]int{"found": len(found)}, scopes: []string{"threads/" + c.Workspace},
 		apply: func(tx *sql.Tx) error {
 			for _, t := range found {
+				var deleted bool
+				if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM deleted_threads WHERE id=?)", t.ID).Scan(&deleted); err != nil {
+					return err
+				}
+				if deleted {
+					continue
+				}
 				_, err := scanThread(tx.QueryRow("SELECT "+threadFields+" FROM threads WHERE id=?", t.ID))
 				if err == nil {
 					// Existing metadata can be deliberately edited by Johnny clients.
@@ -307,6 +343,11 @@ func saveReplay(tx *sql.Tx, t thread, history *stream) error {
 	if history.err != nil {
 		return history.err
 	}
+	if history.setup != nil {
+		if err := appendEvent(tx, "thread/"+t.ID, "session.setup", history.setup); err != nil {
+			return err
+		}
+	}
 	for _, n := range history.replay {
 		if err := appendEvent(tx, "thread/"+t.ID, "acp.history", n); err != nil {
 			return err
@@ -316,10 +357,6 @@ func saveReplay(tx *sql.Tx, t thread, history *stream) error {
 }
 
 func (s *Service) openThread(ctx context.Context, t thread) (mutation, error) {
-	// Explicit open is cheap after the history has been mirrored.
-	if t.Imported {
-		return mutation{result: t}, nil
-	}
 	r, history, err := s.attach(ctx, t)
 	if err != nil {
 		return mutation{}, err
@@ -331,7 +368,7 @@ func (s *Service) openThread(ctx context.Context, t thread) (mutation, error) {
 	if history.err != nil {
 		return mutation{}, history.err
 	}
-	t.Imported = true
+	t.Imported = t.Imported || history.isReplay
 	m := patch(t)
 	m.scopes = append(m.scopes, "thread/"+t.ID)
 	m.apply = func(tx *sql.Tx) error {
@@ -351,6 +388,26 @@ type turn struct {
 	idACP  acp.SessionId
 	agent  agentProcess
 	cancel context.CancelFunc
+}
+
+// Agents may omit session_info_update. Keep the first user text as a stable
+// list title until the agent supplies one for the new conversation.
+func promptTitle(blocks []acp.ContentBlock) string {
+	for _, block := range blocks {
+		if block.Text == nil {
+			continue
+		}
+		text := strings.Join(strings.Fields(block.Text.Text), " ")
+		if text == "" {
+			continue
+		}
+		chars := []rune(text)
+		if len(chars) > 60 {
+			return string(chars[:59]) + "…"
+		}
+		return text
+	}
+	return ""
 }
 
 func (s *Service) prompt(ctx context.Context, j job, c command, t thread) (mutation, error) {
@@ -376,8 +433,12 @@ func (s *Service) prompt(ctx context.Context, j job, c command, t thread) (mutat
 	id := stableID(j.device, j.id)
 	scope := "thread/" + t.ID
 	listScope := "threads/" + t.Workspace
+	needsTitle := strings.TrimSpace(t.Title) == ""
+	if needsTitle {
+		t.Title = promptTitle(c.Prompt)
+	}
 	t.Active, t.Updated = id, now()
-	t.Imported = t.Imported || history != nil
+	t.Imported = t.Imported || (history != nil && history.isReplay)
 	turnCtx, cancel := context.WithTimeout(s.ctx, 30*time.Minute)
 	defer cancel()
 	tr := &turn{id: id, idACP: acp.SessionId(t.Session), agent: r.process, cancel: cancel}
@@ -427,6 +488,9 @@ func (s *Service) prompt(ctx context.Context, j job, c command, t thread) (mutat
 	if st.err != nil {
 		status = "failed"
 		promptErr = st.err
+	}
+	if needsTitle && st.agentTitle != "" {
+		t.Title = st.agentTitle
 	}
 	t.Active, t.Updated = "", now()
 	state := map[string]any{"turn_id": id, "status": status, "stop_reason": out.StopReason}

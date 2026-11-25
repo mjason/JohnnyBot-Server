@@ -143,20 +143,27 @@ func (a *Agent) NewSession(ctx context.Context, cwd string) (acp.NewSessionRespo
 	return a.conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 }
 
-// Open attaches to an existing session. replayed reports that the agent sent the
-// history as updates: they are old, so the caller must not store them as new ones.
-func (a *Agent) Open(ctx context.Context, id acp.SessionId, cwd string) (replayed bool, err error) {
-	caps := a.Info.AgentCapabilities
-	switch {
-	case caps.SessionCapabilities.Resume != nil:
-		_, err = a.conn.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{}})
-		return false, err
-	case caps.LoadSession:
-		_, err = a.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{}})
-		a.updates.flush()
-		return true, err
+// Open returns the current settings negotiated when attaching to an existing session.
+func (a *Agent) Open(ctx context.Context, id acp.SessionId, cwd string) (acp.NewSessionResponse, error) {
+	if a.Info.AgentCapabilities.SessionCapabilities.Resume != nil {
+		out, err := a.conn.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{}})
+		return acp.NewSessionResponse{SessionId: id, Meta: out.Meta, ConfigOptions: out.ConfigOptions, Modes: out.Modes}, err
 	}
-	return false, errors.New("agent can neither resume nor load a session")
+	return a.LoadHistory(ctx, id, cwd)
+}
+
+func (a *Agent) CanDelete() bool { return a.Info.AgentCapabilities.SessionCapabilities.Delete != nil }
+
+func (a *Agent) Delete(ctx context.Context, id acp.SessionId) error {
+	_, err := a.conn.DeleteSession(ctx, acp.DeleteSessionRequest{SessionId: id})
+	return err
+}
+func (a *Agent) SetConfig(ctx context.Context, req acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	return a.conn.SetSessionConfigOption(ctx, req)
+}
+func (a *Agent) SetMode(ctx context.Context, id acp.SessionId, mode acp.SessionModeId) error {
+	_, err := a.conn.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: id, ModeId: mode})
+	return err
 }
 
 // List returns all sessions, following the pages.
@@ -234,11 +241,11 @@ func errText(err error) string {
 }
 
 // LoadHistory attaches the session and asks the adapter to replay its history.
-func (a *Agent) LoadHistory(ctx context.Context, id acp.SessionId, cwd string) error {
+func (a *Agent) LoadHistory(ctx context.Context, id acp.SessionId, cwd string) (acp.NewSessionResponse, error) {
 	if !a.Info.AgentCapabilities.LoadSession {
-		return errors.New("agent does not advertise history replay")
+		return acp.NewSessionResponse{}, errors.New("agent does not advertise history replay")
 	}
-	_, err := a.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{}})
+	out, err := a.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionId: id, Cwd: cwd, McpServers: []acp.McpServer{}})
 	a.updates.flush()
-	return err
+	return acp.NewSessionResponse{SessionId: id, Meta: out.Meta, ConfigOptions: out.ConfigOptions, Modes: out.Modes}, err
 }

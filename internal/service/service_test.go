@@ -20,6 +20,7 @@ import (
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
+	mqttpacket "github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho"
 	"golang.org/x/crypto/ssh"
 
@@ -41,10 +42,18 @@ func (f *fakeProcess) Close() error          { return nil }
 func (f *fakeProcess) NewSession(context.Context, string) (acp.NewSessionResponse, error) {
 	return acp.NewSessionResponse{SessionId: "created"}, nil
 }
-func (f *fakeProcess) Open(context.Context, acp.SessionId, string) (bool, error) { return false, nil }
-func (f *fakeProcess) LoadHistory(_ context.Context, id acp.SessionId, _ string) error {
+func (f *fakeProcess) Open(_ context.Context, id acp.SessionId, _ string) (acp.NewSessionResponse, error) {
+	return acp.NewSessionResponse{SessionId: id}, nil
+}
+func (f *fakeProcess) CanDelete() bool                             { return true }
+func (f *fakeProcess) Delete(context.Context, acp.SessionId) error { return nil }
+func (f *fakeProcess) SetConfig(context.Context, acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	return acp.SetSessionConfigOptionResponse{}, nil
+}
+func (f *fakeProcess) SetMode(context.Context, acp.SessionId, acp.SessionModeId) error { return nil }
+func (f *fakeProcess) LoadHistory(_ context.Context, id acp.SessionId, _ string) (acp.NewSessionResponse, error) {
 	f.handler.Update(acp.SessionNotification{SessionId: id, Update: acp.UpdateAgentMessageText("old transcript")})
-	return nil
+	return acp.NewSessionResponse{SessionId: id}, nil
 }
 func (f *fakeProcess) List(context.Context) ([]acp.SessionInfo, error) {
 	return []acp.SessionInfo{{SessionId: "old", Cwd: f.cwd, Title: acp.Ptr("existing")}}, nil
@@ -107,7 +116,7 @@ func (d *mqttDevice) connect(t *testing.T, addr, fingerprint string, scopes ...s
 	d.conn = c
 	replies, hints := make(chan []byte, 32), make(chan string, 32)
 	d.replies, d.hints = replies, hints
-	d.client = paho.NewClient(paho.ClientConfig{Conn: c,
+	d.client = paho.NewClient(paho.ClientConfig{Conn: mqttpacket.NewThreadSafeConn(c),
 		OnPublishReceived: []func(paho.PublishReceived) (bool, error){func(p paho.PublishReceived) (bool, error) {
 			if strings.Contains(p.Packet.Topic, "/reply/") {
 				replies <- p.Packet.Payload
@@ -303,7 +312,7 @@ func TestMQTTScopedOfflineWorkflow(t *testing.T) {
 	if _, err := cache.Position(ctx, scope); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("unselected detail unexpectedly cached: %v", err)
 	}
-	if got := syncDevice(t, b, cache, "thread/"+oldID); len(got) != 1 || got[0].Kind != "acp.history" {
+	if got := syncDevice(t, b, cache, "thread/"+oldID); len(got) != 2 || got[0].Kind != "session.setup" || got[1].Kind != "acp.history" {
 		t.Fatalf("missing imported transcript: %v", got)
 	}
 
@@ -397,6 +406,24 @@ func TestMQTTScopedOfflineWorkflow(t *testing.T) {
 	}
 	if !json.Valid(fragments) || !bytes.Contains(fragments, []byte(strings.Repeat("z", 120<<10))) {
 		t.Fatalf("large streamed response lost bytes: %d bytes", len(fragments))
+	}
+	b.call(t, command{ID: newID(), Op: "thread.set_config", Thread: oldID, Epoch: epoch, ConfigID: "model", Value: json.RawMessage(`"test"`)}, nil)
+	b.call(t, command{ID: newID(), Op: "thread.set_mode", Thread: oldID, Epoch: epoch, ModeID: "fixture"}, nil)
+	configEvents := syncDevice(t, b, cache, "thread/"+oldID)
+	if len(configEvents) < 2 || configEvents[len(configEvents)-2].Kind != "session.config" || configEvents[len(configEvents)-1].Kind != "session.mode" {
+		t.Fatalf("missing settings sync: %v", configEvents)
+	}
+	b.call(t, command{ID: newID(), Op: "thread.delete", Thread: oldID, Epoch: epoch}, nil)
+	b.call(t, command{ID: newID(), Op: "thread.refresh", Workspace: "mobile", Epoch: epoch}, nil)
+	if _, err := s.store.thread(ctx, oldID); err == nil {
+		t.Fatal("refresh resurrected deleted session")
+	}
+	indexEvents := syncDevice(t, b, cache, "threads/mobile")
+	if len(indexEvents) == 0 || indexEvents[len(indexEvents)-1].Kind != "thread.deleted" {
+		t.Fatal("missing durable list deletion")
+	}
+	if terminalAvailable() {
+		t.Run("terminal", func(t *testing.T) { testTerminalMQTT(t, s, a, b, epoch) })
 	}
 	b.conn.Close()
 	offline, err := cache.Events(ctx, scope, 0, 100)

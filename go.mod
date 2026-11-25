@@ -4,6 +4,7 @@ go 1.27.4
 
 require (
 	github.com/coder/acp-go-sdk v0.20.0
+	github.com/creack/pty v1.1.24
 	github.com/eclipse/paho.golang v0.24.0
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/mochi-mqtt/server/v2 v2.7.9

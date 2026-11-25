@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	acp "github.com/coder/acp-go-sdk"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -81,7 +82,14 @@ func openStore(ctx context.Context, path string) (*store, error) {
 				return err
 			}
 		}
+		// Additive migration for databases created before permanent deletion.
+		if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS deleted_threads (id TEXT PRIMARY KEY)"); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("INSERT OR IGNORE INTO meta VALUES('epoch',lower(hex(randomblob(16))))"); err != nil {
+			return err
+		}
+		if err := restoreSessionTitles(tx); err != nil {
 			return err
 		}
 		return tx.QueryRow("SELECT value FROM meta WHERE key='epoch'").Scan(&s.epoch)
@@ -91,6 +99,65 @@ func openStore(ctx context.Context, path string) (*store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// Older servers kept ACP titles in the detail stream without updating the
+// workspace list. Replay only missing titles and publish each repaired row.
+func restoreSessionTitles(tx *sql.Tx) error {
+	marker, err := tx.Exec("INSERT OR IGNORE INTO meta VALUES('session_titles_v1','done')")
+	if err != nil {
+		return err
+	}
+	count, err := marker.RowsAffected()
+	if err != nil || count == 0 {
+		return err
+	}
+	rows, err := tx.Query("SELECT " + threadFields + " FROM threads WHERE trim(title)=''")
+	if err != nil {
+		return err
+	}
+	var missing []thread
+	for rows.Next() {
+		t, err := scanThread(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		missing = append(missing, t)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, t := range missing {
+		scope := "thread/" + t.ID
+		err := tx.QueryRow(`SELECT trim(json_extract(CAST(body AS TEXT),'$.notification.update.title')) AS name
+            FROM events WHERE scope=? AND kind='acp.update'
+            AND json_extract(CAST(body AS TEXT),'$.notification.update.sessionUpdate')='session_info_update'
+            AND name<>'' ORDER BY seq DESC LIMIT 1`, scope).Scan(&t.Title)
+		if errors.Is(err, sql.ErrNoRows) {
+			var text string
+			err = tx.QueryRow(`SELECT block.value ->> 'text' FROM events, json_each(CAST(body AS TEXT),'$.prompt') block
+                WHERE scope=? AND kind='message.user' AND block.value ->> 'type'='text'
+                AND trim(block.value ->> 'text')<>'' ORDER BY seq, block.key LIMIT 1`, scope).Scan(&text)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			t.Title = promptTitle([]acp.ContentBlock{acp.TextBlock(text)})
+		}
+		if err != nil {
+			return err
+		}
+		if t.Title != "" {
+			if err := putThread(tx, t); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *store) close() {
