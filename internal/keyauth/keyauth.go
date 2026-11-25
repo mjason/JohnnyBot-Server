@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,9 +57,10 @@ func Sign(key ed25519.PrivateKey, host string, now time.Time) string {
 
 // Keyring holds the keys of an authorized_keys file.
 type Keyring struct {
-	path string
-	host string
-	log  *slog.Logger
+	path       string
+	configFile bool
+	host       string
+	log        *slog.Logger
 
 	mu   sync.RWMutex
 	raw  []byte
@@ -68,7 +70,15 @@ type Keyring struct {
 
 // Open reads the file. A missing file means that no device may connect.
 func Open(path, hostFingerprint string, log *slog.Logger) (*Keyring, error) {
-	k := &Keyring{path: path, host: hostFingerprint, log: log, seen: map[string]time.Time{}}
+	return open(path, hostFingerprint, log, false)
+}
+
+func OpenConfig(path, hostFingerprint string, log *slog.Logger) (*Keyring, error) {
+	return open(path, hostFingerprint, log, true)
+}
+
+func open(path, hostFingerprint string, log *slog.Logger, config bool) (*Keyring, error) {
+	k := &Keyring{configFile: config, path: path, host: hostFingerprint, log: log, seen: map[string]time.Time{}}
 	_, err := k.Reload()
 	return k, err
 }
@@ -77,16 +87,36 @@ func Open(path, hostFingerprint string, log *slog.Logger) (*Keyring, error) {
 // When the file cannot be read, every device is.
 func (k *Keyring) Reload() (removed []string, err error) {
 	raw, err := os.ReadFile(k.path)
-	if errors.Is(err, os.ErrNotExist) {
+	if !k.configFile && errors.Is(err, os.ErrNotExist) {
 		raw, err = nil, nil
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if err == nil && k.keys != nil && bytes.Equal(raw, k.raw) {
+	if err == nil && k.raw != nil && bytes.Equal(raw, k.raw) {
 		return nil, nil
 	}
 	keys := map[string]ed25519.PublicKey{}
-	for i, line := range strings.Split(string(raw), "\n") {
+	lines := strings.Split(string(raw), "\n")
+	if k.configFile {
+		var config struct {
+			AuthorizedKeys []string `json:"authorized_keys"`
+		}
+		if err == nil {
+			err = json.Unmarshal(raw, &config)
+		}
+		lines = config.AuthorizedKeys
+		if err == nil && lines == nil {
+			err = errors.New("config requires an authorized_keys array")
+		}
+		if err != nil {
+			lines = nil
+		}
+	}
+	for i, line := range lines {
+		if k.configFile && strings.ContainsAny(line, "\r\n") {
+			k.log.Warn("multiline device key ignored", "entry", i+1)
+			continue
+		}
 		if line = strings.TrimSpace(line); line == "" || line[0] == '#' {
 			continue
 		}
@@ -101,6 +131,9 @@ func (k *Keyring) Reload() (removed []string, err error) {
 		if _, ok := keys[id]; !ok {
 			removed = append(removed, id)
 		}
+	}
+	if err != nil {
+		raw = nil
 	}
 	k.raw, k.keys = raw, keys
 	return removed, err

@@ -20,6 +20,7 @@ func serve(ctx context.Context, args []string) error {
 	host := fs.String("host", hostname, "name of this host in the topics")
 	conf, _ := os.UserConfigDir()
 	data := fs.String("data", filepath.Join(conf, "johnnybot"), "directory of the database, host.pem, and authorized_keys")
+	config := fs.String("config", os.Getenv("JOHNNYBOT_CONFIG"), "JSON device configuration path")
 	var workspaces []service.Workspace
 	fs.Func("workspace", "workspace ID and server directory (ID=/path, repeatable)", func(value string) error {
 		id, path, ok := strings.Cut(value, "=")
@@ -48,7 +49,12 @@ func serve(ctx context.Context, args []string) error {
 	}
 	fp := broker.HostFingerprint(cert)
 	keysPath := filepath.Join(dataPath, "authorized_keys")
-	keys, err := keyauth.Open(keysPath, fp, log)
+	openKeys := keyauth.Open
+	if *config != "" {
+		keysPath = *config
+		openKeys = keyauth.OpenConfig
+	}
+	keys, err := openKeys(keysPath, fp, log)
 	if err != nil {
 		return err
 	}

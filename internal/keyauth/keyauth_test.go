@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -84,5 +85,32 @@ func TestUnsupportedLinesGrantNothing(t *testing.T) {
 	k.Reload()
 	if len(k.keys) != 0 {
 		t.Fatal(len(k.keys))
+	}
+}
+
+func TestDeviceConfigReload(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	id := DeviceID(pub)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	data, _ := json.Marshal(map[string][]string{"authorized_keys": {strings.TrimSpace(line(t, pub)) + " iPhone"}})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	k, err := OpenConfig(path, "host", slog.New(slog.DiscardHandler))
+	if err != nil || !k.Has(id) {
+		t.Fatalf("key missing: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := k.Reload()
+	if err == nil || len(removed) != 1 || k.Has(id) {
+		t.Fatal("malformed config must revoke access")
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Reload(); err != nil || !k.Has(id) {
+		t.Fatal("valid config must restore access", err)
 	}
 }

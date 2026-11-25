@@ -7,6 +7,7 @@ WorkingDirectory=%h
 ConfigurationDirectory=johnnybot
 ConfigurationDirectoryMode=0700
 Environment=JOHNNYBOT_LISTEN=127.0.0.1:8883
+# Set JOHNNYBOT_CONFIG in service.env to use a JSON device allowlist.
 EnvironmentFile=-%E/johnnybot/service.env
 ExecStart=%h/.local/libexec/johnnybot/johnnybot serve -addr ${JOHNNYBOT_LISTEN} -host %H -data %E/johnnybot -workspace default=%h
 Restart=on-failure
