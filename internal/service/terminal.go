@@ -5,13 +5,16 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -36,14 +39,15 @@ type terminalManager struct {
 }
 
 type terminal struct {
-	mu    sync.Mutex
-	info  terminalInfo
-	cmd   *exec.Cmd
-	fd    *os.File
-	input chan []byte
-	done  chan struct{}
-	ring  []byte
-	end   int64
+	mu      sync.Mutex
+	info    terminalInfo
+	cmd     *exec.Cmd
+	fd      *os.File
+	input   chan []byte
+	done    chan struct{}
+	changed chan struct{}
+	ring    []byte
+	end     int64
 }
 
 func (t *terminal) append(data []byte) {
@@ -53,6 +57,10 @@ func (t *terminal) append(data []byte) {
 	n := copy(t.ring[start:], data)
 	copy(t.ring, data[n:])
 	t.end += int64(len(data))
+	if t.changed != nil {
+		close(t.changed)
+		t.changed = nil
+	}
 }
 
 func (t *terminal) serve() {
@@ -136,6 +144,62 @@ func terminalAvailable() bool {
 
 func validDimensions(cols, rows int) bool {
 	return cols >= 1 && rows >= 1 && cols <= 512 && rows <= 256
+}
+
+// An outstanding read must never block the broker from receiving the next keystroke.
+func (s *Service) readTerminal(device string, c command) error {
+	if c.WaitMS < 0 || c.WaitMS > 2000 {
+		return s.publisher.Reply(device, s.encode(c.ID, nil, fault("invalid_argument", "wait_ms must be between 0 and 2000")))
+	}
+	reply := func() error {
+		result, err := s.terminalOperation(device, c)
+		return s.publisher.Reply(device, s.encode(c.ID, result, err))
+	}
+	if c.WaitMS == 0 {
+		return reply()
+	}
+	s.terminals.mu.Lock()
+	t := s.terminals.tabs[c.Terminal]
+	s.terminals.mu.Unlock()
+	if t == nil {
+		return reply()
+	}
+	t.mu.Lock()
+	if !t.info.Running || c.Offset != t.end {
+		t.mu.Unlock()
+		return reply()
+	}
+	select {
+	case s.terminalReaders <- struct{}{}:
+	default:
+		t.mu.Unlock()
+		return s.publisher.Reply(device, s.encode(c.ID, nil, fault("server_busy", "too many waiting terminal reads")))
+	}
+	if t.changed == nil {
+		t.changed = make(chan struct{})
+	}
+	changed := t.changed
+	t.mu.Unlock()
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		defer func() { <-s.terminalReaders }()
+		timer := time.NewTimer(time.Duration(c.WaitMS) * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-changed:
+		case <-t.done:
+		case <-timer.C:
+		case <-s.ctx.Done():
+			return
+		}
+		if s.authorized(device) {
+			if err := reply(); err != nil && s.ctx.Err() == nil {
+				s.log.Warn("terminal read reply", "err", err)
+			}
+		}
+	}()
+	return nil
 }
 
 func (s *Service) terminalOperation(device string, c command) (any, error) {
@@ -247,6 +311,36 @@ func (s *Service) terminalOperation(device string, c command) (any, error) {
 	return nil, fault("unsupported_op", "unknown terminal operation")
 }
 
+// Resolve the service account through NSS; systemd's environment need not contain SHELL.
+func terminalAccount() (shell, home string, err error) {
+	uid := strconv.Itoa(os.Geteuid())
+	record, err := exec.Command("getent", "passwd", uid).Output()
+	if err != nil {
+		record, err = os.ReadFile("/etc/passwd")
+		if err != nil {
+			return "", "", err
+		}
+	}
+	for _, line := range strings.Split(string(record), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) != 7 || fields[2] != uid {
+			continue
+		}
+		shell, home = fields[6], fields[5]
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		if !filepath.IsAbs(shell) {
+			return "", "", fmt.Errorf("account shell must be absolute: %q", shell)
+		}
+		if _, err := exec.LookPath(shell); err != nil {
+			return "", "", err
+		}
+		return shell, home, nil
+	}
+	return "", "", fmt.Errorf("no passwd entry for service uid %s", uid)
+}
+
 func startTerminal(w Workspace, rel, device string, cols, rows int) (*terminal, error) {
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
@@ -254,15 +348,40 @@ func startTerminal(w Workspace, rel, device string, cols, rows int) (*terminal, 
 	}
 	// Only this workspace is writable on the host. Use a private /tmp and no
 	// agent sockets, service credentials in the environment, or host /proc.
+	shell, accountHome, err := terminalAccount()
+	if err != nil {
+		return nil, err
+	}
 	args := []string{"--unshare-all", "--share-net", "--die-with-parent", "--ro-bind", "/usr", "/usr", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"}
-	for _, path := range []string{"/bin", "/lib", "/lib64", "/sbin", "/etc/ssl/certs", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/alternatives", "/etc/terminfo"} {
+	for _, path := range []string{"/bin", "/lib", "/lib64", "/sbin", "/etc/ssl/certs", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/alternatives", "/etc/os-release", "/etc/terminfo", "/etc/zsh", "/etc/bash.bashrc", "/etc/inputrc", "/etc/fish"} {
 		if _, err := os.Stat(path); err == nil {
 			args = append(args, "--ro-bind", path, path)
 		}
 	}
-	args = append(args, "--bind", w.Path, "/workspace", "--chdir", filepath.Join("/workspace", rel), "/bin/bash", "--noprofile", "--norc", "-i")
+	// A custom account shell can live outside the mounted system runtime.
+	if !(strings.HasPrefix(shell, "/usr/") || strings.HasPrefix(shell, "/bin/") || strings.HasPrefix(shell, "/sbin/")) {
+		args = append(args, "--ro-bind", shell, shell)
+	}
+	home := "/tmp/terminal-home"
+	// Only load personal startup files when the account home is the configured workspace.
+	// A project's own .zshrc or .bashrc must not become the account's startup file.
+	if realHome, err := filepath.EvalSymlinks(accountHome); err == nil && realHome == w.Path {
+		home = "/workspace"
+		// Preserve absolute paths in personal startup files without exposing another host directory.
+		if filepath.Dir(accountHome) == "/home" || accountHome == "/root" {
+			args = append(args, "--symlink", "/workspace", accountHome)
+			home = accountHome
+		}
+	} else {
+		args = append(args, "--dir", home)
+	}
+	args = append(args, "--bind", w.Path, "/workspace", "--chdir", filepath.Join("/workspace", rel), "--", shell)
+	if home == "/tmp/terminal-home" && filepath.Base(shell) == "zsh" {
+		// A fresh private HOME otherwise triggers zsh-newuser-install and consumes the first key.
+		args = append(args, "-f")
+	}
 	cmd := exec.Command(bwrap, args...)
-	cmd.Env = []string{"PATH=/workspace/.local/bin:/usr/local/bin:/usr/bin:/bin", "HOME=/workspace", "LANG=C.UTF-8", "TERM=xterm-256color", "SHELL=/bin/bash"}
+	cmd.Env = []string{"PATH=" + home + "/.local/bin:/usr/local/bin:/usr/bin:/bin", "HOME=" + home, "LANG=C.UTF-8", "TERM=xterm-256color", "SHELL=" + shell}
 	fd, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil, err

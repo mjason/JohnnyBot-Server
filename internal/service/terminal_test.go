@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -91,3 +92,74 @@ func TestOutputRingResetAtByteBoundary(t *testing.T) {
 		t.Fatalf("wrapped read: %+v %v", p, err)
 	}
 }
+
+func TestWaitingTerminalRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	replies := make(chan []byte, 4)
+	tab := &terminal{info: terminalInfo{ID: "tab", Running: true}, ring: make([]byte, 32), done: make(chan struct{})}
+	s := &Service{ctx: ctx, publisher: terminalTestReplies{replies}, authorized: func(string) bool { return true }, terminalReaders: make(chan struct{}, 4)}
+	s.terminals.tabs = map[string]*terminal{"tab": tab}
+	read := command{Op: "terminal.read", Terminal: "tab", WaitMS: 2000}
+	for _, id := range []string{"one", "two"} {
+		read.ID = id
+		if err := s.readTerminal(id, read); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-replies:
+		t.Fatal("idle read returned early")
+	default:
+	}
+	tab.append([]byte("echo"))
+	for range 2 {
+		select {
+		case raw := <-replies:
+			var r struct {
+				OK     bool
+				Result struct {
+					Bytes []byte
+					Next  int `json:"next_offset"`
+				}
+			}
+			if err := json.Unmarshal(raw, &r); err != nil || !r.OK || string(r.Result.Bytes) != "echo" || r.Result.Next != 4 {
+				t.Fatalf("incorrect wakeup: %s", raw)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("output did not wake both waiting clients")
+		}
+	}
+	read.Offset = 4
+	read.WaitMS = 10
+	if err := s.readTerminal("one", read); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-replies:
+	case <-time.After(time.Second):
+		t.Fatal("read did not time out")
+	}
+	read.WaitMS = 2000
+	if err := s.readTerminal("one", read); err != nil {
+		t.Fatal(err)
+	}
+	tab.mu.Lock()
+	tab.info.Running = false
+	tab.mu.Unlock()
+	close(tab.done)
+	select {
+	case raw := <-replies:
+		if !bytes.Contains(raw, []byte(`"running":false`)) {
+			t.Fatalf("missing exit: %s", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("exit did not wake reader")
+	}
+	s.workers.Wait()
+}
+
+type terminalTestReplies struct{ ch chan []byte }
+
+func (p terminalTestReplies) Reply(_ string, payload []byte) error { p.ch <- payload; return nil }
+func (p terminalTestReplies) Event(string, []byte) error           { return nil }

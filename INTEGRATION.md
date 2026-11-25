@@ -231,7 +231,7 @@ sqlite3 /path/to/johnnybot.db \
 
 ## 会话管理与终端
 
-`workspaces.list` 返回的 `capabilities` 含布尔值 `thread_delete`、`thread_config`、`thread_mode`、`terminal`。终端需要 Linux、bubblewrap、bash 及可用的用户命名空间。对具体会话的按钮以最新 `session.setup` 的能力和选项为准。使用同一设备私有 cmd/reply topic、MQTT 5 QoS 1、`cmd_id`、写入用的 `epoch`。
+`workspaces.list` 返回的 `capabilities` 含布尔值 `thread_delete`、`thread_config`、`thread_mode`、`terminal` 和 `terminal_wait`。终端需要 Linux、bubblewrap、账号配置的 shell 及可用的用户命名空间。对具体会话的按钮以最新 `session.setup` 的能力和选项为准。使用同一设备私有 cmd/reply topic、MQTT 5 QoS 1、`cmd_id`、写入用的 `epoch`。
 
 | 命令 | 输入 | 行为 |
 |------|------|------|
@@ -243,9 +243,11 @@ sqlite3 /path/to/johnnybot.db \
 | `terminal.claim` | `terminal_id` | 同一用户的另一已配对设备可显式接管，回复 `{terminal:…}`。 |
 | `terminal.input` | `terminal_id,bytes` | 标准 base64，解码后 1 至 32768 字节。回复 `{accepted:N}`。按发送顺序逐个等待确认。 |
 | `terminal.resize` | `terminal_id,cols,rows` | 1 至 512 列、1 至 256 行，回复 `{terminal:…}`。 |
-| `terminal.read` | `terminal_id,offset` | 按原始字节偏移读最多 24 KiB，回复 `{bytes,first_offset,next_offset,reset,running,terminal}`，bytes 为标准 base64。 |
+| `terminal.read` | `terminal_id,offset[,wait_ms]` | 支持 `terminal_wait` 时可等待 0–2000 毫秒；有数据、偏移需重置或进程退出时立即返回。省略时立即读取。按原始字节偏移读最多 24 KiB，回复 `{bytes,first_offset,next_offset,reset,running,terminal}`，bytes 为标准 base64。 |
 | `terminal.close` | `terminal_id` | 移除标签并终止进程，回复 `{terminal_id,closed:true}`。 |
 
 终端对象含 `terminal_id,workspace_id,path,title,cols,rows,controller_device_id,running`。控制权仅限输入、调整尺寸及关闭，失去控制权时返回 `not_controller`。关闭窗口或 MQTT 断线会保留进程，重连后先 list 再从最后确认的 offset 读取。若 offset 超出 256 KiB 环形缓存，`reset:true`，客户端清空显示并应用本批字节；捕获最后一批后继续读至空。进程退出后仍可读，显式关闭后移除。服务重启会结束全部终端。每个服务最多保留 16 个标签。
 
 终端操作仅在线发送。不要将键盘输入放入离线 outbox，或者在断线后换新 cmd_id 重放未确认的按键。在同一连接中重试原始字节可获得相同回复。服务端只将终端变更命令的摘要和回复写入去重表。启动目录经工作区验证，终端中的 `/workspace` 指向此工作区，系统工具只读挂载，临时目录独立于主机。
+
+终端通过 PTY 启动服务账号在系统用户数据库中配置的交互 shell。工作区根目录为账号主目录时加载个人交互配置，其他工作区使用独立的临时 HOME。

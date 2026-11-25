@@ -31,29 +31,31 @@ type Publisher interface {
 }
 
 type Service struct {
-	terminals    terminalManager
-	ctx          context.Context
-	cancel       context.CancelCauseFunc
-	store        *store
-	log          *slog.Logger
-	workspaces   map[string]Workspace
-	publisher    Publisher
-	authorized   func(string) bool
-	wake         chan struct{}
-	workers      sync.WaitGroup
-	dispatchDone chan struct{}
-	hintsDone    chan struct{}
-	hintsMu      sync.Mutex
-	hints        map[string]struct{}
-	pool         map[string]*adapter
-	turnSlots    chan struct{}
-	mu           sync.Mutex
-	busy         map[string]bool
-	active       map[string]*turn
-	permissions  map[string]*approval
+	terminals       terminalManager
+	terminalReaders chan struct{}
+	ctx             context.Context
+	cancel          context.CancelCauseFunc
+	store           *store
+	log             *slog.Logger
+	workspaces      map[string]Workspace
+	publisher       Publisher
+	authorized      func(string) bool
+	wake            chan struct{}
+	workers         sync.WaitGroup
+	dispatchDone    chan struct{}
+	hintsDone       chan struct{}
+	hintsMu         sync.Mutex
+	hints           map[string]struct{}
+	pool            map[string]*adapter
+	turnSlots       chan struct{}
+	mu              sync.Mutex
+	busy            map[string]bool
+	active          map[string]*turn
+	permissions     map[string]*approval
 }
 
 type command struct {
+	WaitMS     int                `json:"wait_ms,omitempty"`
 	Terminal   string             `json:"terminal_id,omitempty"`
 	Cols       int                `json:"cols,omitempty"`
 	Rows       int                `json:"rows,omitempty"`
@@ -125,7 +127,7 @@ func Open(ctx context.Context, path string, configs []Workspace, authorized func
 	ctx, cancel := context.WithCancelCause(ctx)
 	s := &Service{
 		ctx: ctx, cancel: cancel, store: db, log: log, workspaces: ws, authorized: authorized,
-		wake: make(chan struct{}, 1), dispatchDone: make(chan struct{}), turnSlots: make(chan struct{}, 8),
+		terminalReaders: make(chan struct{}, 64), wake: make(chan struct{}, 1), dispatchDone: make(chan struct{}), turnSlots: make(chan struct{}, 8),
 		hintsDone: make(chan struct{}), hints: make(map[string]struct{}),
 		pool: make(map[string]*adapter), busy: make(map[string]bool), active: make(map[string]*turn), permissions: make(map[string]*approval),
 	}
@@ -224,12 +226,14 @@ func (s *Service) Handle(device string, payload []byte) error {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "pi"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"terminal": terminalAvailable(), "thread_delete": true, "thread_config": true, "thread_mode": true}}
+		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "pi"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"terminal": terminalAvailable(), "terminal_wait": terminalAvailable(), "thread_delete": true, "thread_config": true, "thread_mode": true}}
 	case "directories.list":
 		result, err = s.browse(c)
 	case "file.read":
 		result, err = s.readFile(c)
-	case "terminal.list", "terminal.read":
+	case "terminal.read":
+		return s.readTerminal(device, c)
+	case "terminal.list":
 		result, err = s.terminalOperation(device, c)
 	case "terminal.create", "terminal.claim", "terminal.input", "terminal.resize", "terminal.close":
 		if c.Epoch != s.store.epoch {
