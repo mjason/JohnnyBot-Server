@@ -28,7 +28,6 @@ type Spec struct {
 var Presets = map[string]Spec{
 	"codex":       {Name: "codex", Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp@latest"}, Env: []string{"NO_BROWSER=1"}},
 	"antigravity": {Name: "antigravity", Command: "agy", Args: []string{"acp"}},
-	"pi":          {Name: "pi", Command: "npx", Args: []string{"-y", "pi-acp@latest"}},
 }
 
 // Handler receives what the agent sends.

@@ -286,6 +286,14 @@ func TestMQTTScopedOfflineWorkflow(t *testing.T) {
 	var ping struct{ Epoch string }
 	a.call(t, command{ID: newID(), Op: "ping"}, &ping)
 	epoch := ping.Epoch
+	var advertised struct{ Agents []string }
+	a.call(t, command{ID: newID(), Op: "workspaces.list"}, &advertised)
+	if strings.Join(advertised.Agents, ",") != "codex,antigravity" {
+		t.Fatalf("unexpected supported agents: %v", advertised.Agents)
+	}
+	if _, ok := agent.Presets["pi"]; ok {
+		t.Fatal("unsupported pi adapter is registered")
+	}
 
 	a.call(t, command{ID: newID(), Op: "thread.refresh", Workspace: "mobile", Epoch: epoch}, nil)
 	a.call(t, command{ID: newID(), Op: "thread.refresh", Workspace: "other", Epoch: epoch}, nil)
@@ -421,6 +429,25 @@ func TestMQTTScopedOfflineWorkflow(t *testing.T) {
 	indexEvents := syncDevice(t, b, cache, "threads/mobile")
 	if len(indexEvents) == 0 || indexEvents[len(indexEvents)-1].Kind != "thread.deleted" {
 		t.Fatal("missing durable list deletion")
+	}
+	s.pool["antigravity"].start = func(_ context.Context, h agent.Handler) (agentProcess, error) {
+		return &fakeProcess{handler: h, cwd: root}, nil
+	}
+	agyRefresh := command{Op: "thread.refresh", Agent: "antigravity", Workspace: "mobile", Epoch: epoch}
+	agyRefresh.ID = newID()
+	a.call(t, agyRefresh, nil)
+	agyID := stableID("antigravity", "old")
+	a.call(t, command{ID: newID(), Op: "thread.open", Thread: agyID, Epoch: epoch}, nil)
+	a.call(t, command{ID: newID(), Op: "thread.forget", Thread: agyID, Epoch: epoch}, nil)
+	agyRefresh.ID = newID()
+	a.call(t, agyRefresh, nil)
+	if _, err := s.store.thread(ctx, agyID); err == nil {
+		t.Fatal("Antigravity refresh restored a removed thread")
+	}
+	indexEvents = syncDevice(t, b, cache, "threads/mobile")
+	last := indexEvents[len(indexEvents)-1]
+	if last.Kind != "thread.deleted" || !bytes.Contains(last.Data, []byte(agyID)) {
+		t.Fatal("second device did not receive Antigravity removal")
 	}
 	if terminalAvailable() {
 		t.Run("terminal", func(t *testing.T) { testTerminalMQTT(t, s, a, b, epoch) })

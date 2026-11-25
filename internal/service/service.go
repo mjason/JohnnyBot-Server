@@ -228,7 +228,7 @@ func (s *Service) Handle(device string, payload []byte) error {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "antigravity", "pi"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"quic_reads_v1": s.streamEnabled, "terminal": terminalAvailable(), "terminal_wait": terminalAvailable(), "thread_delete": true, "thread_config": true, "thread_mode": true}}
+		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "antigravity"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"quic_reads_v1": s.streamEnabled, "terminal": terminalAvailable(), "terminal_wait": terminalAvailable(), "thread_forget_antigravity": true, "thread_delete": true, "thread_config": true, "thread_mode": true}}
 	case "directories.list":
 		result, err = s.browse(c)
 	case "file.read":
@@ -245,7 +245,7 @@ func (s *Service) Handle(device string, payload []byte) error {
 		return s.liveTerminalCommand(device, c, payload)
 	case "sync.pull":
 		result, err = s.pull(c)
-	case "thread.delete", "thread.set_config", "thread.set_mode", "thread.refresh", "thread.create", "thread.open", "thread.rename", "thread.archive", "prompt.send", "turn.cancel", "permission.answer":
+	case "thread.forget", "thread.delete", "thread.set_config", "thread.set_mode", "thread.refresh", "thread.create", "thread.open", "thread.rename", "thread.archive", "prompt.send", "turn.cancel", "permission.answer":
 		if c.Epoch != s.store.epoch {
 			err = fault("epoch_mismatch", "database epoch changed or was omitted; reconcile queued commands")
 			break
@@ -473,6 +473,11 @@ func (s *Service) mutate(ctx context.Context, j job, c command) (mutation, error
 		return m, err
 	}
 	switch c.Op {
+	case "thread.forget":
+		if t.Agent != "antigravity" {
+			return m, fault("unsupported", "removal without upstream deletion is only supported for Antigravity")
+		}
+		m = s.removeThreadRecords(t)
 	case "thread.delete":
 		m, err = s.deleteThread(ctx, t)
 	case "thread.set_config", "thread.set_mode":

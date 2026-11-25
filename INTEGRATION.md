@@ -6,7 +6,7 @@ Johnny Bot 在内网运行。Go 进程管理 ACP Agent、SQLite 数据库和嵌�
 
 ## 1. 安装和启动
 
-需要 Linux 或 macOS、Go 1.27.4、启用 CGO 并安装 C 编译器、Node.js 和 `npx`。SQLite 由 Go 驱动编译进服务端。运行服务的系统用户应已完成所用 Agent 的登录。默认启动 Codex，使用 `npx -y @agentclientprotocol/codex-acp@latest`。Antigravity 使用 Google 官方 CLI 的 `agy acp`，运行服务的用户需要能从 PATH 找到 `agy`，并可通过 `agy acp --login` 完成首次登录。pi 通过 `npx -y pi-acp@latest` 启动。
+需要 Linux 或 macOS、Go 1.27.4、启用 CGO 并安装 C 编译器、Node.js 和 `npx`。SQLite 由 Go 驱动编译进服务端。运行服务的系统用户应已完成所用 Agent 的登录。默认启动 Codex，使用 `npx -y @agentclientprotocol/codex-acp@latest`。Antigravity 使用 Google 官方 CLI 的 `agy acp`，运行服务的用户需要能从 PATH 找到 `agy`，并可通过 `agy acp --login` 完成首次登录。
 
 ```sh
 go build -buildvcs=false -o bin/johnnybot ./cmd/johnnybot
@@ -218,7 +218,7 @@ CREATE TABLE outbox (
 go test -buildvcs=false -race ./...
 ```
 
-MQTT 集成测试需要能监听本地 TCP。测试使用真实 TLS、MQTT 和 SQLite，使用可复现的测试 Agent，覆盖两设备订阅、会话发现和导入、断开并重开客户端数据库、出站重放和大响应分片。上线前用实际运行账号登录 Agent，按相同流程验证 Codex、Antigravity 和 pi 的能力及历史重放，必要时在预发环境固定 adapter 版本。
+MQTT 集成测试需要能监听本地 TCP。测试使用真实 TLS、MQTT 和 SQLite，使用可复现的测试 Agent，覆盖两设备订阅、会话发现和导入、断开并重开客户端数据库、出站重放和大响应分片。上线前用实际运行账号登录 Agent，按相同流程验证 Codex 和 Antigravity 的能力及历史重放，必要时在预发环境固定 adapter 版本。
 
 备份用 SQLite 的在线备份机制，或先停止服务再复制数据目录。保留 `host.pem` 可以延续已配对设备的 TLS 信任。恢复较旧备份、复制成新服务实例或需要主动让设备重建缓存时，为恢复后的数据库轮换 epoch。操作应在服务停止时进行。
 
@@ -237,6 +237,7 @@ sqlite3 /path/to/johnnybot.db \
 |------|------|------|
 | `thread.set_config` | `thread_id,config_id,value` | 将字符串选项 ID 或布尔值交给 ACP。成功回复及详情事件 `session.config` 携带完整 `configOptions`。模型作为 agent 声明的配置项选择。 |
 | `thread.set_mode` | `thread_id,mode_id` | 修改 ACP 模式。成功回复及详情事件 `session.mode` 携带 `currentModeId`。 |
+| `thread.forget` | `thread_id` | 服务端声明 `thread_forget_antigravity` 时可移除 Antigravity 会话。清除 JohnnyBot 历史，在所有设备同步删除标记，刷新时跳过该 ID。保留 Antigravity 中的原会话。正在使用的会话返回 `thread_busy`。 |
 | `thread.delete` | `thread_id` | 要求 ACP 声明 `sessionCapabilities.delete`。上游确认后清除本地会话、详情事件和权限记录，工作区收到 `thread.deleted`，包含 `thread_id,workspace_id,deleted:true`。离线设备应用删除并清除详情缓存。已清除的 ID 在刷新时不能重新导入。上游缺少能力时返回 `unsupported`，进行中的会话返回 `thread_busy`。 |
 | `terminal.list` | `workspace_id` | 回复 `{terminals:[…]}`。 |
 | `terminal.create` | `workspace_id,path,cols,rows` | 在工作区相对目录中打开独立 PTY；创建者拥有控制权。回复 `{terminal:…}`。 |

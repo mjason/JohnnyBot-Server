@@ -40,6 +40,10 @@ func (s *Service) deleteThread(ctx context.Context, t thread) (mutation, error) 
 	if err := run.process.Delete(ctx, id); err != nil {
 		return mutation{}, adapterError(err)
 	}
+	return s.removeThreadRecords(t), nil
+}
+
+func (s *Service) removeThreadRecords(t thread) mutation {
 	result := map[string]any{"thread_id": t.ID, "workspace_id": t.Workspace, "deleted": true}
 	scope := "threads/" + t.Workspace
 	return mutation{result: result, scopes: []string{scope}, apply: func(tx *sql.Tx) error {
@@ -59,7 +63,16 @@ func (s *Service) deleteThread(ctx context.Context, t thread) (mutation, error) 
 			return err
 		}
 		return appendEvent(tx, scope, "thread.deleted", result)
-	}, committed: func() { run.mu.Lock(); delete(run.attached, id); run.mu.Unlock() }}, nil
+	}, committed: func() {
+		a := s.pool[t.Agent]
+		a.gate <- struct{}{}
+		defer func() { <-a.gate }()
+		if run := a.current; run != nil {
+			run.mu.Lock()
+			delete(run.attached, acp.SessionId(t.Session))
+			run.mu.Unlock()
+		}
+	}}
 }
 
 // Completed command envelopes can contain prompts, permission answers and thread titles.
