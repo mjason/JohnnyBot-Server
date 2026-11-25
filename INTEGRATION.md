@@ -106,7 +106,7 @@ func mqttCredentials(
 | `ping` | 读 | 返回 `time`（Unix 毫秒）、`epoch`。 |
 | `workspaces.list` | 读 | 返回可见工作区 ID 数组、可选 Agent 名称和 epoch。适合连接后刷新并缓存。 |
 | `directories.list` | 读 | 要求 `workspace_id`，可带相对 `path`、`name_after`。返回 `path`、`parent`（到根为 null）、按名称排序的 `directories` 和 `more`。继续时用末项作 `name_after`。 |
-| `file.read` | 读 | 要求 `thread_id` 和项目相对 `path`。首次 `offset=0`，继续时提交上页 `next_offset` 和 `version`。结果含标准 Base64 的 `bytes`、`next_offset`、`version`、`more`。返回 `file_changed` 时清理暂存并从头读。 |
+| `file.read` | 读 | 会话链接可用 `thread_id` 加会话相对路径，也可传已配置工作区内的绝对 `path`。独立文件预览可传 `workspace_id` 和工作区相对 `path`。首次 `offset=0`，继续时提交上页 `next_offset` 和 `version`。结果含标准 Base64 的 `bytes`、`next_offset`、`version`、`more`。返回 `file_changed` 时清理暂存并从头读。 |
 | `sync.pull` | 读 | 要求 `scope`，支持 `epoch`、`after`、`through`、`limit`。见同步章节。 |
 | `thread.refresh` | 写 | 要求 `workspace_id`、可选 `agent`（默认 codex），从 ACP 分页列出本地会话，登记此工作区内尚未收录的会话。返回 `found`，随后拉取列表。 |
 | `thread.create` | 写 | 要求 `workspace_id`，可选相对 `path`、`agent`、`title`。返回 thread 对象，同时生成列表事件和 `session.setup`。 |

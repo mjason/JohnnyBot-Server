@@ -589,6 +589,25 @@ func TestProjectFileIsConfinedAndVersioned(t *testing.T) {
 	if _, err := s.browse(command{Workspace: "main", Path: "app/outside"}); err == nil {
 		t.Fatal("escaped the workspace root")
 	}
+	for _, c := range []command{
+		{Workspace: "main", Path: "app/example.txt"},
+		{Path: file},
+		{Thread: "test", Path: "../app/example.txt"},
+	} {
+		if _, err := s.readFile(c); err != nil {
+			t.Fatalf("workspace read %+v: %v", c, err)
+		}
+	}
+	for _, c := range []command{
+		{Path: outside},
+		{Workspace: "main", Path: "app/outside/private"},
+		{Path: filepath.Join(project, "outside", "private")},
+		{Thread: "test", Path: "../../" + filepath.Base(other) + "/private"},
+	} {
+		if _, err := s.readFile(c); err == nil {
+			t.Fatalf("escaped workspace: %+v", c)
+		}
+	}
 	val, err := s.readFile(command{Thread: "test", Path: "example.txt"})
 	if err != nil {
 		t.Fatal(err)

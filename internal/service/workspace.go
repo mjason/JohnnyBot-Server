@@ -131,30 +131,56 @@ func (s *Service) browse(c command) (any, error) {
 	return map[string]any{"path": rel, "parent": parent, "directories": names, "more": more}, nil
 }
 
+// File links resolve relative to the conversation by default. The file browser
+// can choose a workspace explicitly, and absolute links can select any configured root.
+func (s *Service) fileLocation(c command) (Workspace, string, error) {
+	if !filepath.IsAbs(c.Path) && c.Workspace != "" {
+		w, err := s.workspace(c.Workspace)
+		if err != nil {
+			return Workspace{}, "", err
+		}
+		path, err := relative(c.Path)
+		return w, path, err
+	}
+	if !filepath.IsAbs(c.Path) {
+		t, err := s.store.thread(s.ctx, c.Thread)
+		if err != nil {
+			return Workspace{}, "", err
+		}
+		w, err := s.workspace(t.Workspace)
+		if err != nil {
+			return Workspace{}, "", err
+		}
+		if path, err := relative(c.Path); err == nil {
+			return w, filepath.Join(t.Path, path), nil
+		}
+		c.Path = filepath.Join(w.Path, t.Path, c.Path)
+	}
+	var best Workspace
+	var path string
+	for _, w := range s.workspaces {
+		rel, err := filepath.Rel(w.Path, c.Path)
+		if err == nil && filepath.IsLocal(rel) && (len(w.Path) > len(best.Path) || (w.Path == best.Path && w.ID < best.ID)) {
+			best, path = w, rel
+		}
+	}
+	if best.ID == "" {
+		return Workspace{}, "", fault("not_found", "file is outside the configured workspaces")
+	}
+	return best, path, nil
+}
+
 func (s *Service) readFile(c command) (any, error) {
-	t, err := s.store.thread(s.ctx, c.Thread)
-	if err != nil {
-		return nil, err
-	}
-	w, err := s.workspace(t.Workspace)
-	if err != nil {
-		return nil, err
-	}
-	path, err := relative(c.Path)
+	w, path, err := s.fileLocation(c)
 	if err != nil {
 		return nil, err
 	}
 	if path == "." || c.Offset < 0 {
 		return nil, fault("invalid_argument", "a file path and nonnegative offset are required")
 	}
-	root, err := os.OpenRoot(w.Path)
+	project, err := os.OpenRoot(w.Path)
 	if err != nil {
 		return nil, err
-	}
-	defer root.Close()
-	project, err := root.OpenRoot(t.Path)
-	if err != nil {
-		return nil, fault("not_found", "project directory is unavailable")
 	}
 	defer project.Close()
 	target, err := project.Lstat(path)
