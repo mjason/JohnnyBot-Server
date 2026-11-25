@@ -6,7 +6,7 @@ Johnny Bot 在内网运行。Go 进程管理 ACP Agent、SQLite 数据库和嵌�
 
 ## 1. 安装和启动
 
-需要 Linux 或 macOS、Go 1.27.4、启用 CGO 并安装 C 编译器、Node.js 和 `npx`。SQLite 由 Go 驱动编译进服务端。运行服务的系统用户应已完成所用 Agent 的登录。默认启动 Codex，使用 `npx -y @agentclientprotocol/codex-acp@latest`。pi 通过 `npx -y pi-acp@latest` 启动。
+需要 Linux 或 macOS、Go 1.27.4、启用 CGO 并安装 C 编译器、Node.js 和 `npx`。SQLite 由 Go 驱动编译进服务端。运行服务的系统用户应已完成所用 Agent 的登录。默认启动 Codex，使用 `npx -y @agentclientprotocol/codex-acp@latest`。Antigravity 使用 Google 官方 CLI 的 `agy acp`，运行服务的用户需要能从 PATH 找到 `agy`，并可通过 `agy acp --login` 完成首次登录。pi 通过 `npx -y pi-acp@latest` 启动。
 
 ```sh
 go build -buildvcs=false -o bin/johnnybot ./cmd/johnnybot
@@ -106,7 +106,7 @@ func mqttCredentials(
 | `ping` | 读 | 返回 `time`（Unix 毫秒）、`epoch`。 |
 | `workspaces.list` | 读 | 返回可见工作区 ID 数组、可选 Agent 名称和 epoch。适合连接后刷新并缓存。 |
 | `directories.list` | 读 | 要求 `workspace_id`，可带相对 `path`、`name_after`。返回 `path`、`parent`（到根为 null）、按名称排序的 `directories` 和 `more`。继续时用末项作 `name_after`。 |
-| `file.read` | 读 | 会话链接可用 `thread_id` 加会话相对路径，也可传已配置工作区内的绝对 `path`。独立文件预览可传 `workspace_id` 和工作区相对 `path`。首次 `offset=0`，继续时提交上页 `next_offset` 和 `version`。结果含标准 Base64 的 `bytes`、`next_offset`、`version`、`more`。返回 `file_changed` 时清理暂存并从头读。 |
+| `file.read` | 读 | 会话链接可用 `thread_id` 加会话相对路径，也可传已配置工作区内的绝对 `path`。独立文件预览可传 `workspace_id` 和工作区相对 `path`。可选 `limit` 指定每页原始字节数，默认 48 KiB，上限 168 KiB。首次 `offset=0`，继续时提交上页 `next_offset` 和 `version`。结果含标准 Base64 的 `bytes`、`next_offset`、`version`、`more`。返回 `file_changed` 时清理暂存并从头读。 |
 | `sync.pull` | 读 | 要求 `scope`，支持 `epoch`、`after`、`through`、`limit`。见同步章节。 |
 | `thread.refresh` | 写 | 要求 `workspace_id`、可选 `agent`（默认 codex），从 ACP 分页列出本地会话，登记此工作区内尚未收录的会话。返回 `found`，随后拉取列表。 |
 | `thread.create` | 写 | 要求 `workspace_id`，可选相对 `path`、`agent`、`title`。返回 thread 对象，同时生成列表事件和 `session.setup`。 |
@@ -218,7 +218,7 @@ CREATE TABLE outbox (
 go test -buildvcs=false -race ./...
 ```
 
-MQTT 集成测试需要能监听本地 TCP。测试使用真实 TLS、MQTT 和 SQLite，使用可复现的测试 Agent，覆盖两设备订阅、会话发现和导入、断开并重开客户端数据库、出站重放和大响应分片。上线前用实际运行账号登录 Agent，按相同流程验证 Codex 和 pi 的能力及历史重放，必要时在预发环境固定 adapter 版本。
+MQTT 集成测试需要能监听本地 TCP。测试使用真实 TLS、MQTT 和 SQLite，使用可复现的测试 Agent，覆盖两设备订阅、会话发现和导入、断开并重开客户端数据库、出站重放和大响应分片。上线前用实际运行账号登录 Agent，按相同流程验证 Codex、Antigravity 和 pi 的能力及历史重放，必要时在预发环境固定 adapter 版本。
 
 备份用 SQLite 的在线备份机制，或先停止服务再复制数据目录。保留 `host.pem` 可以延续已配对设备的 TLS 信任。恢复较旧备份、复制成新服务实例或需要主动让设备重建缓存时，为恢复后的数据库轮换 epoch。操作应在服务停止时进行。
 
@@ -255,3 +255,11 @@ sqlite3 /path/to/johnnybot.db \
 ## systemd 设备配置
 
 在用户服务读取的 `~/.config/johnnybot/service.env` 中设置 `JOHNNYBOT_CONFIG=/绝对路径/devices.json`。配置文件内容为 `{"authorized_keys":["ssh-ed25519 BASE64 设备备注"]}`，每台设备一项。设为空数组可撤销全部设备。服务热加载设备名单，修改环境变量后需重启。设置了该变量时，仅使用指定配置，读取或解析失败时拒绝全部设备。命令行也可以传 `serve -config /绝对路径/devices.json`。
+
+## 可选 QUIC 读取
+
+`serve -quic` 在 MQTT 的同一地址和端口号监听 UDP。客户端从 `workspaces.list.capabilities.quic_reads_v1` 发现此能力，使用 TLS 1.3、相同的证书指纹和设备公钥，ALPN 为 `johnnybot-read-v1`。签名格式沿用 MQTT，将签名首行改为此 ALPN。未启用、UDP 不可达或读取中断时，客户端可以用现有 MQTT API 从已提交的同步游标继续。
+
+每个双向流以 4 字节大端长度和 UTF-8 JSON 请求开始（最多 16 KiB）。字段为 `Host`（MQTT 服务标识）、`Device`、`Proof`、`Follow` 和 `Command`。命令沿用 MQTT 的对象结构，支持 `file.read`（整个文件）和 `sync.pull`。回复帧以 1 字节类型和 4 字节大端长度开头。类型 1 为文件原始字节，2 为原有同步页 JSON，3 为空的成功结束帧，4 为错误码。仅在收到成功结束帧后才能将文件视为完整。同一文件在读取中发生变化时需重新读取。
+
+`Follow=true` 的同步流从客户端提交的游标追到当前水位后继续发送更新页。SQLite 事务同时保存事件和游标。断开后使用本地已提交游标重新订阅。终端、会话写操作和离线命令队列继续走 MQTT。

@@ -41,8 +41,8 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  johnnybot chat     [-agent codex|pi] [-cwd dir] [-session id]
-  johnnybot sessions [-agent codex|pi]
+  johnnybot chat     [-agent codex|antigravity|pi] [-cwd dir] [-session id]
+  johnnybot sessions [-agent codex|antigravity|pi]
   johnnybot serve    [-addr :8883] [-host name] [-data dir] [-workspace ID=/path]`)
 	os.Exit(2)
 }
@@ -63,7 +63,7 @@ func newLogger(verbose bool) *slog.Logger {
 
 // agentFlags adds the flags that choose an agent.
 func agentFlags(fs *flag.FlagSet) func() (agent.Spec, *slog.Logger, error) {
-	name := fs.String("agent", "codex", "codex or pi")
+	name := fs.String("agent", "codex", "codex, antigravity or pi")
 	verbose := fs.Bool("v", false, "log the agent's stderr")
 	return func() (agent.Spec, *slog.Logger, error) {
 		spec, ok := agent.Presets[*name]

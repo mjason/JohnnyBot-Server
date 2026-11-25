@@ -8,11 +8,13 @@ require (
 	github.com/eclipse/paho.golang v0.24.0
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/mochi-mqtt/server/v2 v2.7.9
+	github.com/quic-go/quic-go v0.66.0
 	golang.org/x/crypto v0.59.0
 )
 
 require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/rs/xid v1.4.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 )

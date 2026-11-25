@@ -15,6 +15,7 @@ import (
 
 func serve(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	quicReads := fs.Bool("quic", false, "serve file and sync streams on the same UDP port")
 	addr := fs.String("addr", ":8883", "address to listen on")
 	hostname, _ := os.Hostname()
 	host := fs.String("host", hostname, "name of this host in the topics")
@@ -66,6 +67,13 @@ func serve(ctx context.Context, args []string) error {
 	b, err := broker.New(*host, *addr, cert, keys, s.Handle, log)
 	if err != nil {
 		return err
+	}
+	if *quicReads {
+		stop, err := s.StartReadStreams(b.Addr().String(), *host, cert, keys)
+		if err != nil {
+			return err
+		}
+		defer stop()
 	}
 	s.Run(b)
 	fmt.Printf("listening on   %s\nhost           %s\nfingerprint    %s\nauthorized_keys %s\n", b.Addr(), *host, fp, keysPath)

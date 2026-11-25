@@ -166,6 +166,14 @@ func (k *Keyring) Has(device string) bool {
 
 // Verify checks the proof of a device. A proof works once.
 func (k *Keyring) Verify(device, proof string, now time.Time) error {
+	return k.verify("johnnybot-mqtt-auth-v1", device, proof, now)
+}
+
+func (k *Keyring) VerifyRead(device, proof string, now time.Time) error {
+	return k.verify("johnnybot-read-v1", device, proof, now)
+}
+
+func (k *Keyring) verify(protocol, device, proof string, now time.Time) error {
 	parts := strings.Split(proof, ".")
 	if len(parts) != 3 {
 		return errors.New("malformed proof")
@@ -191,7 +199,7 @@ func (k *Keyring) Verify(device, proof string, now time.Time) error {
 	if !ok {
 		return errors.New("unknown device")
 	}
-	if !ed25519.Verify(pub, message(k.host, device, ts, nonce), sig) {
+	if !ed25519.Verify(pub, []byte(strings.Join([]string{protocol, k.host, device, ts, nonce}, "\n")), sig) {
 		return errors.New("bad signature")
 	}
 	for n, until := range k.seen {

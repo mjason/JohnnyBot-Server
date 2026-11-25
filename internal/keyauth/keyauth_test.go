@@ -114,3 +114,26 @@ func TestDeviceConfigReload(t *testing.T) {
 		t.Fatal("valid config must restore access", err)
 	}
 }
+
+func TestReadProofIsSeparateFromMQTTAndSingleUse(t *testing.T) {
+	ring, key, _ := setup(t)
+	id := DeviceID(key.Public().(ed25519.PublicKey))
+	now := time.Now()
+	mqtt := Sign(key, "HOST", now)
+	if ring.VerifyRead(id, mqtt, now) == nil {
+		t.Fatal("MQTT proof accepted on read stream")
+	}
+	parts := strings.Split(mqtt, ".")
+	signed := strings.Join([]string{"johnnybot-read-v1", "HOST", id, parts[0], parts[1]}, "\n")
+	parts[2] = b64.EncodeToString(ed25519.Sign(key, []byte(signed)))
+	read := strings.Join(parts, ".")
+	if ring.Verify(id, read, now) == nil {
+		t.Fatal("read proof accepted by MQTT")
+	}
+	if err := ring.VerifyRead(id, read, now); err != nil {
+		t.Fatal(err)
+	}
+	if ring.VerifyRead(id, read, now) == nil {
+		t.Fatal("read proof replayed")
+	}
+}

@@ -616,6 +616,13 @@ func TestProjectFileIsConfinedAndVersioned(t *testing.T) {
 	if first["more"] != true || first["next_offset"] != int64(48<<10) {
 		t.Fatalf("invalid first page: %v %v", first["more"], first["next_offset"])
 	}
+	large, err := s.readFile(command{Thread: "test", Path: "example.txt", Limit: 168 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if large.(map[string]any)["more"] != false {
+		t.Fatal("larger page should read the entire test file")
+	}
 	if err := os.WriteFile(file, bytes.Repeat([]byte{'y'}, 65<<10), 0o600); err != nil {
 		t.Fatal(err)
 	}

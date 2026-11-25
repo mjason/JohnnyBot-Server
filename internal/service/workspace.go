@@ -170,32 +170,41 @@ func (s *Service) fileLocation(c command) (Workspace, string, error) {
 	return best, path, nil
 }
 
-func (s *Service) readFile(c command) (any, error) {
+func (s *Service) openProjectFile(c command) (*os.File, os.FileInfo, error) {
 	w, path, err := s.fileLocation(c)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if path == "." || c.Offset < 0 {
-		return nil, fault("invalid_argument", "a file path and nonnegative offset are required")
+		return nil, nil, fault("invalid_argument", "a file path and nonnegative offset are required")
 	}
 	project, err := os.OpenRoot(w.Path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer project.Close()
 	target, err := project.Lstat(path)
 	if err != nil || !target.Mode().IsRegular() {
-		return nil, fault("not_found", "regular file does not exist")
+		return nil, nil, fault("not_found", "regular file does not exist")
 	}
 	f, err := project.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fault("not_found", "file is unavailable")
+		return nil, nil, fault("not_found", "file is unavailable")
 	}
-	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return nil, fault("not_found", "regular file is unavailable")
+		f.Close()
+		return nil, nil, fault("not_found", "regular file is unavailable")
 	}
+	return f, info, nil
+}
+
+func (s *Service) readFile(c command) (any, error) {
+	f, info, err := s.openProjectFile(c)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 	if c.Offset > info.Size() {
 		return nil, fault("invalid_argument", "offset exceeds file size")
 	}
@@ -203,7 +212,12 @@ func (s *Service) readFile(c command) (any, error) {
 	if c.Offset > 0 && c.Version != version {
 		return nil, fault("file_changed", "restart the read from offset zero")
 	}
-	buf := make([]byte, min(48<<10, info.Size()-c.Offset))
+	pageSize := 48 << 10
+	if c.Limit > 0 {
+		// Leave room for Base64, JSON and MQTT framing in a 256 KiB packet.
+		pageSize = min(c.Limit, 168<<10)
+	}
+	buf := make([]byte, min(int64(pageSize), info.Size()-c.Offset))
 	n, err := f.ReadAt(buf, c.Offset)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err

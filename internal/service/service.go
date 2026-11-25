@@ -31,6 +31,8 @@ type Publisher interface {
 }
 
 type Service struct {
+	streamEnabled   bool
+	watchers        map[string]map[chan struct{}]bool
 	terminals       terminalManager
 	terminalReaders chan struct{}
 	ctx             context.Context
@@ -128,7 +130,7 @@ func Open(ctx context.Context, path string, configs []Workspace, authorized func
 	s := &Service{
 		ctx: ctx, cancel: cancel, store: db, log: log, workspaces: ws, authorized: authorized,
 		terminalReaders: make(chan struct{}, 64), wake: make(chan struct{}, 1), dispatchDone: make(chan struct{}), turnSlots: make(chan struct{}, 8),
-		hintsDone: make(chan struct{}), hints: make(map[string]struct{}),
+		hintsDone: make(chan struct{}), hints: make(map[string]struct{}), watchers: make(map[string]map[chan struct{}]bool),
 		pool: make(map[string]*adapter), busy: make(map[string]bool), active: make(map[string]*turn), permissions: make(map[string]*approval),
 	}
 	for name, spec := range agent.Presets {
@@ -226,7 +228,7 @@ func (s *Service) Handle(device string, payload []byte) error {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "pi"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"terminal": terminalAvailable(), "terminal_wait": terminalAvailable(), "thread_delete": true, "thread_config": true, "thread_mode": true}}
+		result = map[string]any{"workspaces": ids, "agents": []string{"codex", "antigravity", "pi"}, "epoch": s.store.epoch, "capabilities": map[string]bool{"quic_reads_v1": s.streamEnabled, "terminal": terminalAvailable(), "terminal_wait": terminalAvailable(), "thread_delete": true, "thread_config": true, "thread_mode": true}}
 	case "directories.list":
 		result, err = s.browse(c)
 	case "file.read":
@@ -407,6 +409,14 @@ func (s *Service) publishHints() {
 			if len(s.hints) == 0 {
 				s.hintsMu.Unlock()
 				continue
+			}
+			for scope := range s.hints {
+				for ch := range s.watchers[scope] {
+					select {
+					case ch <- struct{}{}:
+					default:
+					}
+				}
 			}
 			hints := s.hints
 			s.hints = make(map[string]struct{})
